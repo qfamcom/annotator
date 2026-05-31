@@ -42,6 +42,17 @@
   color: var(--slate);
 }
 
+
+.config-alert {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #d99a7c;
+  border-radius: 10px;
+  color: #7b2f17;
+  background: #fff2ec;
+  font-weight: 700;
+}
+
 h2 {
   margin: 0 0 12px;
   font-size: 1.05rem;
@@ -177,6 +188,11 @@ button:disabled {
   pointer-events: none;
 }
 
+.annotation-layer {
+  position: absolute;
+  pointer-events: none;
+}
+
 .surface-label {
   position: absolute;
   top: 8px;
@@ -188,6 +204,7 @@ button:disabled {
   border: 1px solid #c8d8d2;
   border-radius: 999px;
   padding: 3px 8px;
+  z-index: 3;
 }
 
 .shape {

@@ -51,7 +51,7 @@ npm start
 
 Default frontend URL (Angular dev server): `http://localhost:4200`
 
-The UI is prewired to backend base URL `http://127.0.0.1:5050` and supports:
+Runtime frontend configuration is loaded from `frontend/public/annotator-config.js` (`window.ANNOTATOR_CONFIG`). Override that file at deploy time to set `apiBase` and `bearerToken`; the checked-in local demo default points at `http://127.0.0.1:5050`. The UI supports:
 - PDF upload (page count auto-detected)
 - Auto-upload as soon as a PDF file is selected
 - PDF-to-JPG page rendering on upload (page previews shown in annotator)
