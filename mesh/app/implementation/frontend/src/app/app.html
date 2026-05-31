@@ -1,0 +1,162 @@
+<main class="shell">
+  <section class="panel header-panel">
+    <h1>Sovereign Triad Mesh</h1>
+    <p>Local Annotation Console (Angular + Flask)</p>
+  </section>
+
+  <section class="panel flow-panel">
+    <h2>1) Upload PDF</h2>
+    <label>
+      PDF File
+      <input type="file" accept="application/pdf,.pdf" (change)="onFileChange($event)" />
+    </label>
+    @if (uploadingDocument) {
+      <div class="loader-wrap">
+        <p class="hint">Uploading document...</p>
+        <div class="loader-bar"><span></span></div>
+      </div>
+    }
+    <p><strong>Document ID:</strong> {{ documentId || 'not set' }}</p>
+  </section>
+
+  <section class="panel flow-panel">
+    <h2>2) Annotate (PDF Page Image)</h2>
+    <p class="hint">
+      Uploaded PDF pages are rendered to JPG. Pick a shape and click-drag on the page image.
+    </p>
+
+    <div class="toolbar">
+      <label>
+        Page
+        <select [ngModel]="currentPage" (ngModelChange)="selectPage($event)">
+          @for (page of availablePages(); track page) {
+            <option [ngValue]="page">Page {{ page }}</option>
+          }
+        </select>
+      </label>
+      <label>
+        Shape
+        <select [(ngModel)]="selectedShape">
+          <option value="rect">Rectangle</option>
+          <option value="circle">Circle</option>
+          <option value="diamond">Diamond</option>
+          <option value="star">Star</option>
+        </select>
+      </label>
+      <button type="button" (click)="clearCurrentPageAnnotations()">Clear Page</button>
+      <button type="button" (click)="clearAllAnnotations()">Clear All</button>
+    </div>
+
+    <div
+      #surface
+      class="annotation-surface"
+      (pointerdown)="onSurfacePointerDown($event, surface)"
+      (pointermove)="onSurfacePointerMove($event, surface)"
+      (pointerup)="onSurfacePointerUp()"
+      (pointerleave)="onSurfacePointerLeave()"
+    >
+      @if (currentPageImageUrl()) {
+        <img [src]="currentPageImageUrl()" alt="PDF page preview" class="page-preview" />
+      }
+
+      <div class="surface-label">Page {{ currentPage }}</div>
+
+      @for (ann of currentPageAnnotations(); track ann.id) {
+        @if (ann.kind === 'star') {
+          <svg
+            class="shape-star-svg persisted"
+            [class.selected]="isSelected(ann.id)"
+            [style.left.%]="ann.x * 100"
+            [style.top.%]="ann.y * 100"
+            [style.width.%]="ann.w * 100"
+            [style.height.%]="ann.h * 100"
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+            (pointerdown)="onAnnotationPointerDown($event, surface, ann.id)"
+          >
+            <polygon points="50,2 61,35 97,35 68,56 79,91 50,70 21,91 32,56 3,35 39,35"></polygon>
+          </svg>
+        } @else {
+          <div
+            class="shape persisted"
+            [class.selected]="isSelected(ann.id)"
+            [class.circle]="ann.kind === 'circle'"
+            [class.diamond]="ann.kind === 'diamond'"
+            [style.left.%]="ann.x * 100"
+            [style.top.%]="ann.y * 100"
+            [style.width.%]="ann.w * 100"
+            [style.height.%]="ann.h * 100"
+            (pointerdown)="onAnnotationPointerDown($event, surface, ann.id)"
+          ></div>
+        }
+      }
+
+      @if (draftRect && draftRect.page === currentPage) {
+        @if (draftRect.kind === 'star') {
+          <svg
+            class="shape-star-svg draft"
+            [style.left.%]="draftRect.x * 100"
+            [style.top.%]="draftRect.y * 100"
+            [style.width.%]="draftRect.w * 100"
+            [style.height.%]="draftRect.h * 100"
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+          >
+            <polygon points="50,2 61,35 97,35 68,56 79,91 50,70 21,91 32,56 3,35 39,35"></polygon>
+          </svg>
+        } @else {
+          <div
+            class="shape draft"
+            [class.circle]="draftRect.kind === 'circle'"
+            [class.diamond]="draftRect.kind === 'diamond'"
+            [style.left.%]="draftRect.x * 100"
+            [style.top.%]="draftRect.y * 100"
+            [style.width.%]="draftRect.w * 100"
+            [style.height.%]="draftRect.h * 100"
+          ></div>
+        }
+      }
+    </div>
+
+    <p class="meta">
+      {{ currentPageAnnotations().length }} annotation(s) on this page,
+      {{ annotations.length }} total.
+    </p>
+  </section>
+
+  <section class="panel flow-panel">
+    <h2>3) Save Annotations</h2>
+    <label>
+      Annotation Version (If-Match)
+      <input [(ngModel)]="annotationVersion" placeholder="v1" />
+    </label>
+    <label>
+      Page IDs (auto-filled from visual annotations)
+      <input [(ngModel)]="pageIdsInput" placeholder="1,3" />
+    </label>
+    <label>
+      Annotations JSON (auto-filled, editable)
+      <textarea rows="8" [(ngModel)]="annotationsJson"></textarea>
+    </label>
+    <div class="action-row">
+      <button (click)="saveAnnotations()" [disabled]="savingAnnotations || preparingDownload || uploadingDocument">Save Annotations</button>
+      @if (savingAnnotations || preparingDownload) {
+        <div class="loader-wrap inline">
+          <p class="hint">Saving and preparing download...</p>
+          <div class="loader-bar"><span></span></div>
+        </div>
+      }
+      @if (preparingDownload) {
+        <button type="button" class="ghost" disabled>Preparing Download...</button>
+      } @else if (downloadUrl) {
+        <button type="button" class="ghost" (click)="downloadAnnotatedFile()">Download Annotated PDF</button>
+      }
+    </div>
+  </section>
+
+  <section class="panel status-panel">
+    <h2>Status</h2>
+    <p>{{ statusText }}</p>
+    <pre>{{ responsePanel }}</pre>
+  </section>
+</main>

@@ -1,0 +1,28 @@
+{
+  "status": "draft",
+  "version": "0.1.0",
+  "integrations": [
+    {
+      "name": "pdf_parser_renderer_adapter",
+      "status": "draft"
+    },
+    {
+      "name": "annotation_overlay_adapter",
+      "status": "draft"
+    },
+    {
+      "name": "jpg_page_conversion_adapter",
+      "status": "draft"
+    },
+    {
+      "name": "zip_packaging_adapter",
+      "status": "draft"
+    }
+  ],
+  "verification": {
+    "e2e": "pending",
+    "contract_checks": "pending",
+    "notes": "Must verify deterministic page ordering and full annotated-page coverage in PDF/JPG ZIP outputs."
+  },
+  "notes": "Draft integration contract for v1 document annotation exports."
+}

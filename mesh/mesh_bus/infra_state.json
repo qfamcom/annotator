@@ -1,0 +1,59 @@
+{
+  "status": "provisioning",
+  "version": "0.1.0",
+  "environment": "repo-local-v1",
+  "resources": {
+    "compute": [
+      "api_service_runtime",
+      "export_worker_runtime"
+    ],
+    "database": [
+      "postgresql: annotation_metadata_store"
+    ],
+    "network": [
+      "api_worker_private_channel"
+    ],
+    "secrets": [
+      "object_storage_credentials",
+      "auth_signing_secret",
+      "service_runtime_config"
+    ],
+    "object_storage": [
+      "minio: annotation-uploads",
+      "minio: annotation-exports"
+    ],
+    "queue_cache": [
+      "redis: export_job_state"
+    ]
+  },
+  "limits": {
+    "max_file_size_mb": 50,
+    "max_page_count": 100
+  },
+  "targets": [
+    "local",
+    "staging",
+    "prod"
+  ],
+  "phase2_checkpoints": {
+    "infra_scaffold_files_created": true,
+    "local_stack_defined": true,
+    "env_template_defined": true,
+    "smoke_check_script_defined": true,
+    "local_stack_applied": true,
+    "local_validation_service_health": true,
+    "local_validation_50mb_object_storage": true,
+    "local_validation_100_page_metadata": true,
+    "local_validation_queue_load": true,
+    "staging_configured": false,
+    "prod_configured": false
+  },
+  "artifacts": {
+    "implementation_readme": "infra/implementation/README.md",
+    "compose_file": "infra/implementation/docker-compose.infra.yml",
+    "env_template": "infra/implementation/.env.infra.example",
+    "smoke_check": "infra/implementation/scripts/smoke_check.sh",
+    "local_validation_report": "infra/implementation/validation/phase2_local_validation_2026-05-31.md"
+  },
+  "notes": "Phase 2 infra prerequisites scaffolded; local stack applied and local validation checks passed for service health, 50MB object storage write, 100-page metadata simulation, and queue load sanity."
+}

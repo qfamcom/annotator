@@ -1,0 +1,99 @@
+{
+  "status": "draft",
+  "version": "0.1.0",
+  "service": "sovereign-triad-mesh-annotation-api",
+  "endpoints": [
+    {
+      "name": "upload_document",
+      "method": "POST",
+      "path": "/v1/documents",
+      "auth": "required",
+      "request": {
+        "content_type": "multipart/form-data",
+        "fields": ["file"]
+      },
+      "response": {
+        "success": {
+          "status": 201,
+          "body": {
+            "document_id": "string",
+            "page_count": "number",
+            "state": "uploaded"
+          }
+        },
+        "errors": [400, 401, 413, 415]
+      }
+    },
+    {
+      "name": "save_annotations",
+      "method": "POST",
+      "path": "/v1/documents/{document_id}/annotations",
+      "auth": "required",
+      "request": {
+        "headers": ["If-Match: annotation_version"],
+        "body": {
+          "annotations": "array",
+          "page_ids": "array"
+        }
+      },
+      "response": {
+        "success": {
+          "status": 200,
+          "body": {
+            "document_id": "string",
+            "annotation_version": "string",
+            "saved_page_ids": "array"
+          }
+        },
+        "errors": [400, 401, 404, 409]
+      }
+    },
+    {
+      "name": "create_export",
+      "method": "POST",
+      "path": "/v1/documents/{document_id}/exports",
+      "auth": "required",
+      "request": {
+        "body": {
+          "format": "pdf|jpg_zip",
+          "annotation_version": "string"
+        }
+      },
+      "response": {
+        "success": {
+          "status": 202,
+          "body": {
+            "export_id": "string",
+            "status": "queued"
+          }
+        },
+        "errors": [400, 401, 404, 409]
+      }
+    },
+    {
+      "name": "get_export_status",
+      "method": "GET",
+      "path": "/v1/exports/{export_id}",
+      "auth": "required",
+      "request": {
+        "query": []
+      },
+      "response": {
+        "success": {
+          "status": 200,
+          "body": {
+            "export_id": "string",
+            "status": "queued|processing|complete|failed",
+            "download_url": "string|null"
+          }
+        },
+        "errors": [401, 404]
+      }
+    }
+  ],
+  "compatibility": {
+    "policy": "additive changes only within v0.1.x",
+    "deprecation": "minimum one minor version notice before removal"
+  },
+  "notes": "Draft contract aligned to PRD v1 scope: PDF upload, annotation persistence, PDF/JPG ZIP export."
+}

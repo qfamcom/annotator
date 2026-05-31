@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Node / Angular
+node_modules/
+dist/
+
+# Local runtime/state
+mesh/app/implementation/backend/data/
+mesh/infra/implementation/.env.infra
+
+# Logs
+*.log
+
+mesh/app/implementation/data/
