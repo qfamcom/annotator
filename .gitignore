@@ -21,3 +21,4 @@ mesh/infra/implementation/.env.infra
 *.log
 
 mesh/app/implementation/data/
+.gstack/
