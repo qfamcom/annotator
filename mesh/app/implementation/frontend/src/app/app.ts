@@ -1,4 +1,4 @@
-import { Component } from '@angular/core';
+import { ChangeDetectorRef, Component } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
@@ -89,8 +89,15 @@ export class App {
   statusText = 'Ready';
   responsePanel = '';
 
-  constructor(private http: HttpClient) {
+  constructor(
+    private http: HttpClient,
+    private cdr: ChangeDetectorRef
+  ) {
     this.loadRuntimeConfig();
+  }
+
+  private notifyViewStateChanged(): void {
+    this.cdr.markForCheck();
   }
 
   private loadRuntimeConfig(): void {
@@ -556,6 +563,7 @@ export class App {
     this.invalidateExport('New document selected. Existing export was cleared.');
     this.uploadingDocument = true;
     this.statusText = `Uploading ${uploadFile.name}...`;
+    this.notifyViewStateChanged();
 
     const form = new FormData();
     form.append('file', uploadFile, uploadFile.name);
@@ -578,15 +586,18 @@ export class App {
       this.pageIdsInput = '';
       this.statusText = `Upload succeeded: ${resp.document_id}`;
       this.setResponse('UPLOAD', resp);
+      this.notifyViewStateChanged();
     } catch (err: any) {
       if (uploadToken !== this.activeUploadToken) {
         return;
       }
       this.statusText = this.apiErrorMessage(err);
       this.setResponse('UPLOAD_ERROR', err?.error ?? err?.message ?? err);
+      this.notifyViewStateChanged();
     } finally {
       if (uploadToken === this.activeUploadToken) {
         this.uploadingDocument = false;
+        this.notifyViewStateChanged();
       }
     }
   }
