@@ -3,6 +3,18 @@ import { FormsModule } from '@angular/forms';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 
+type RuntimeConfig = {
+  apiBase?: string;
+  bearerToken?: string;
+};
+
+declare global {
+  interface Window {
+    ANNOTATOR_CONFIG?: RuntimeConfig;
+    __ANNOTATOR_CONFIG__?: RuntimeConfig;
+  }
+}
+
 type UploadResponse = { document_id: string; page_count: number; state: string; preview_urls?: string[] };
 type AnnotationResponse = { document_id: string; annotation_version: string; saved_page_ids: number[] };
 type DownloadCreateResponse = { export_id: string; status: string };
@@ -19,6 +31,17 @@ type VisualAnnotation = {
   h: number;
 };
 
+type NormalizedPoint = { x: number; y: number } | null;
+type SaveSnapshot = { documentId: string; annotations: unknown; pageIds: number[]; annotationVersion: string };
+
+type ExportRef = {
+  documentId: string;
+  annotationVersion: string;
+  signature: string;
+  exportId: string;
+  downloadUrl: string;
+};
+
 @Component({
   selector: 'app-root',
   imports: [FormsModule],
@@ -26,12 +49,14 @@ type VisualAnnotation = {
   styleUrl: './app.css'
 })
 export class App {
-  apiBase = 'http://127.0.0.1:5050';
-  bearerToken = 'localtest';
+  apiBase = '';
+  bearerToken = '';
+  configError = '';
 
   selectedFile: File | null = null;
   uploadingDocument = false;
-  private pendingUploadFile: File | null = null;
+  private uploadRequestSeq = 0;
+  private activeUploadToken = 0;
   uploadedPageCount = 0;
   pagePreviewUrls: string[] = [];
   currentPage = 1;
@@ -54,36 +79,55 @@ export class App {
 
   downloadId = '';
   downloadUrl = '';
+  exportStatusUrl = '';
   preparingDownload = false;
   private downloadTaskToken = 0;
+  private readyExport: ExportRef | null = null;
+  private lastExportRequest: { documentId: string; annotationVersion: string; signature: string; exportId: string } | null = null;
   savingAnnotations = false;
 
   statusText = 'Ready';
   responsePanel = '';
 
-  constructor(private http: HttpClient) {}
+  constructor(private http: HttpClient) {
+    this.loadRuntimeConfig();
+  }
+
+  private loadRuntimeConfig(): void {
+    const cfg = window.ANNOTATOR_CONFIG ?? window.__ANNOTATOR_CONFIG__ ?? {};
+    this.apiBase = (cfg.apiBase ?? '').trim().replace(/\/$/, '');
+    this.bearerToken = (cfg.bearerToken ?? '').trim();
+
+    if (!this.apiBase) {
+      this.configError = 'Configuration error: API URL is missing. Set window.ANNOTATOR_CONFIG.apiBase in public/annotator-config.js.';
+      this.statusText = 'Configuration required before using the annotation app.';
+      return;
+    }
+
+    if (!this.bearerToken) {
+      this.configError = 'Configuration warning: auth token is missing. Upload/save/download requests may be rejected by the API.';
+    }
+  }
 
   async onFileChange(event: Event): Promise<void> {
     const input = event.target as HTMLInputElement;
     const picked = input.files && input.files.length > 0 ? input.files[0] : null;
     this.selectedFile = picked;
-    if (picked) {
-      this.pendingUploadFile = picked;
-      if (this.uploadingDocument) {
-        this.statusText = `Upload in progress. Queued ${picked.name}.`;
-      } else {
-        await this.processUploadQueue();
-      }
-      // Allow selecting the same file again to trigger change.
-      input.value = '';
-    }
-  }
 
-  private async processUploadQueue(): Promise<void> {
-    while (this.pendingUploadFile) {
-      const next = this.pendingUploadFile;
-      this.pendingUploadFile = null;
-      await this.uploadDocument(next);
+    if (picked) {
+      if (!this.isPdfFile(picked)) {
+        this.selectedFile = null;
+        this.statusText = 'Only PDF files are supported.';
+        this.setResponse('UPLOAD_VALIDATION_ERROR', { error: 'unsupported_media_type', filename: picked.name });
+        input.value = '';
+        return;
+      }
+
+      const uploadToken = ++this.uploadRequestSeq;
+      this.activeUploadToken = uploadToken;
+      // Allow selecting the same file again while this upload is still in flight.
+      input.value = '';
+      await this.uploadDocument(picked, uploadToken);
     }
   }
 
@@ -111,6 +155,27 @@ export class App {
     return this.pagePreviewUrls[idx];
   }
 
+  onPagePreviewLoad(): void {
+    // Image load triggers Angular change detection so the overlay layer can be
+    // recalculated from the image's natural aspect ratio before the user draws.
+  }
+
+  isDownloadCurrent(): boolean {
+    const signature = this.currentAnnotationSignature(this.annotationVersion);
+    return Boolean(
+      this.readyExport &&
+        this.downloadUrl &&
+        this.readyExport.documentId === this.documentId &&
+        this.readyExport.annotationVersion === this.annotationVersion &&
+        this.readyExport.signature === signature &&
+        this.readyExport.downloadUrl === this.downloadUrl
+    );
+  }
+
+  canUseConfiguredApi(): boolean {
+    return Boolean(this.apiBase);
+  }
+
   private resolveApiUrl(url: string): string {
     if (!url) {
       return '';
@@ -122,25 +187,127 @@ export class App {
   }
 
   private authHeaders(extra: Record<string, string> = {}): HttpHeaders {
-    return new HttpHeaders({
-      Authorization: `Bearer ${this.bearerToken}`,
-      ...extra
-    });
+    const headers: Record<string, string> = { ...extra };
+    if (this.bearerToken) {
+      headers.Authorization = `Bearer ${this.bearerToken}`;
+    }
+    return new HttpHeaders(headers);
   }
 
   private setResponse(label: string, data: unknown): void {
     this.responsePanel = `${label}\n${JSON.stringify(data, null, 2)}`;
   }
 
+  private apiErrorMessage(err: any): string {
+    const code = err?.error?.error ?? err?.error ?? err?.message ?? err;
+    const normalized = typeof code === 'string' ? code : '';
+    const messages: Record<string, string> = {
+      unsupported_media_type: 'Only PDF files are supported.',
+      invalid_pdf: 'The selected PDF could not be read. Choose a valid PDF file.',
+      file_too_large: 'The selected PDF is too large. Choose a file up to 50MB.',
+      page_count_exceeds_limit: 'The selected PDF has too many pages.',
+      unauthorized: 'Authentication failed. Check the configured bearer token.',
+      missing_file: 'No file was sent to the API.',
+      invalid_json: 'Annotations JSON is invalid.',
+      invalid_payload: 'Annotation payload is invalid.',
+      invalid_page_ids: 'Page IDs must be whole numbers.',
+      page_out_of_range: 'One or more annotation pages are outside the uploaded document.',
+      annotation_version_not_found: 'The saved annotation version was not found for export.',
+      export_not_found: 'The export was not found. Prepare the download again.',
+      export_not_ready: 'The export is still processing.'
+    };
+    return messages[normalized] ?? (normalized ? `Request failed: ${normalized}` : 'Request failed. Please try again.');
+  }
+
+  private isPdfFile(file: File): boolean {
+    const nameLooksPdf = file.name.toLowerCase().endsWith('.pdf');
+    const type = (file.type ?? '').toLowerCase();
+    const typeLooksPdf = type === '' || type === 'application/pdf' || type.includes('pdf');
+    return nameLooksPdf && typeLooksPdf;
+  }
+
   private clamp01(value: number): number {
     return Math.max(0, Math.min(1, value));
   }
 
-  private toNormalizedPoint(evt: PointerEvent, surface: HTMLElement): { x: number; y: number } {
-    const rect = surface.getBoundingClientRect();
-    const x = this.clamp01((evt.clientX - rect.left) / rect.width);
-    const y = this.clamp01((evt.clientY - rect.top) / rect.height);
-    return { x, y };
+  renderedImageRect(surface: HTMLElement): DOMRectReadOnly {
+    const surfaceRect = surface.getBoundingClientRect();
+    const img = surface.querySelector<HTMLImageElement>('img.page-preview');
+    const naturalWidth = img?.naturalWidth || 0;
+    const naturalHeight = img?.naturalHeight || 0;
+
+    if (!naturalWidth || !naturalHeight) {
+      return { left: surfaceRect.left, top: surfaceRect.top, width: surfaceRect.width, height: surfaceRect.height } as DOMRectReadOnly;
+    }
+
+    const surfaceRatio = surfaceRect.width / surfaceRect.height;
+    const imageRatio = naturalWidth / naturalHeight;
+    let width = surfaceRect.width;
+    let height = surfaceRect.height;
+    let left = surfaceRect.left;
+    let top = surfaceRect.top;
+
+    if (imageRatio > surfaceRatio) {
+      height = width / imageRatio;
+      top += (surfaceRect.height - height) / 2;
+    } else {
+      width = height * imageRatio;
+      left += (surfaceRect.width - width) / 2;
+    }
+
+    return { left, top, width, height } as DOMRectReadOnly;
+  }
+
+
+  imageLayerLeftPercent(surface: HTMLElement): number {
+    const surfaceRect = surface.getBoundingClientRect();
+    if (!surfaceRect.width) {
+      return 0;
+    }
+    const imageRect = this.renderedImageRect(surface);
+    return ((imageRect.left - surfaceRect.left) / surfaceRect.width) * 100;
+  }
+
+  imageLayerTopPercent(surface: HTMLElement): number {
+    const surfaceRect = surface.getBoundingClientRect();
+    if (!surfaceRect.height) {
+      return 0;
+    }
+    const imageRect = this.renderedImageRect(surface);
+    return ((imageRect.top - surfaceRect.top) / surfaceRect.height) * 100;
+  }
+
+  imageLayerWidthPercent(surface: HTMLElement): number {
+    const surfaceRect = surface.getBoundingClientRect();
+    if (!surfaceRect.width) {
+      return 100;
+    }
+    const imageRect = this.renderedImageRect(surface);
+    return (imageRect.width / surfaceRect.width) * 100;
+  }
+
+  imageLayerHeightPercent(surface: HTMLElement): number {
+    const surfaceRect = surface.getBoundingClientRect();
+    if (!surfaceRect.height) {
+      return 100;
+    }
+    const imageRect = this.renderedImageRect(surface);
+    return (imageRect.height / surfaceRect.height) * 100;
+  }
+
+  private toNormalizedPoint(evt: PointerEvent, surface: HTMLElement): NormalizedPoint {
+    const rect = this.renderedImageRect(surface);
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    const rawX = (evt.clientX - rect.left) / rect.width;
+    const rawY = (evt.clientY - rect.top) / rect.height;
+    if (rawX < 0 || rawX > 1 || rawY < 0 || rawY > 1) {
+      return null;
+    }
+
+    return { x: this.clamp01(rawX), y: this.clamp01(rawY) };
   }
 
   private findAnnotation(annotationId: string): VisualAnnotation | undefined {
@@ -168,6 +335,28 @@ export class App {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  invalidateExport(reason: string): void {
+    this.downloadTaskToken += 1;
+    this.preparingDownload = false;
+    this.downloadId = '';
+    this.downloadUrl = '';
+    this.exportStatusUrl = '';
+    this.readyExport = null;
+    this.lastExportRequest = null;
+    if (reason) {
+      this.statusText = reason;
+    }
+  }
+
+  currentAnnotationSignature(annotationVersion = this.annotationVersion): string {
+    return JSON.stringify({
+      documentId: this.documentId,
+      annotationVersion,
+      pageIdsInput: this.pageIdsInput.trim(),
+      annotationsJson: this.annotationsJson.trim()
+    });
+  }
+
   private syncPayloadFromVisualAnnotations(): void {
     const sorted = [...this.annotations].sort((a, b) => (a.page === b.page ? a.id.localeCompare(b.id) : a.page - b.page));
     const payload = sorted.map((a) => ({
@@ -185,6 +374,21 @@ export class App {
     this.pageIdsInput = pages.join(',');
   }
 
+  onAnnotationVersionChange(value: string): void {
+    this.annotationVersion = value;
+    this.invalidateExport('Annotation version changed. Save annotations to prepare a new download.');
+  }
+
+  onPageIdsInputChange(value: string): void {
+    this.pageIdsInput = value;
+    this.invalidateExport('Page IDs changed. Save annotations to prepare a new download.');
+  }
+
+  onAnnotationsJsonChange(value: string): void {
+    this.annotationsJson = value;
+    this.invalidateExport('Annotations JSON changed. Save annotations to prepare a new download.');
+  }
+
   onAnnotationPointerDown(evt: PointerEvent, surface: HTMLElement, annotationId: string): void {
     evt.stopPropagation();
     if (!this.documentId) {
@@ -197,6 +401,9 @@ export class App {
     }
 
     const p = this.toNormalizedPoint(evt, surface);
+    if (!p) {
+      return;
+    }
     this.selectedAnnotationId = annotationId;
     this.draggingAnnotationId = annotationId;
     this.drawing = false;
@@ -212,6 +419,10 @@ export class App {
     }
 
     const p = this.toNormalizedPoint(evt, surface);
+    if (!p) {
+      this.statusText = 'Start drawing inside the rendered PDF page.';
+      return;
+    }
     this.selectedAnnotationId = '';
     this.draggingAnnotationId = '';
     this.drawing = true;
@@ -235,6 +446,9 @@ export class App {
         return;
       }
       const p = this.toNormalizedPoint(evt, surface);
+      if (!p) {
+        return;
+      }
       this.setAnnotationPosition(this.draggingAnnotationId, p.x - this.dragOffsetX, p.y - this.dragOffsetY);
       return;
     }
@@ -244,6 +458,9 @@ export class App {
     }
 
     const p = this.toNormalizedPoint(evt, surface);
+    if (!p) {
+      return;
+    }
     const x = Math.min(this.drawStartX, p.x);
     const y = Math.min(this.drawStartY, p.y);
     const w = Math.abs(p.x - this.drawStartX);
@@ -262,6 +479,7 @@ export class App {
     if (this.draggingAnnotationId) {
       this.draggingAnnotationId = '';
       this.syncPayloadFromVisualAnnotations();
+      this.invalidateExport('Annotation moved. Save annotations to prepare a new download.');
       return;
     }
 
@@ -283,6 +501,7 @@ export class App {
     });
     this.selectedAnnotationId = this.annotations[this.annotations.length - 1]?.id ?? '';
     this.syncPayloadFromVisualAnnotations();
+    this.invalidateExport('Annotation added. Save annotations to prepare a new download.');
   }
 
   onSurfacePointerLeave(): void {
@@ -297,11 +516,15 @@ export class App {
   }
 
   clearCurrentPageAnnotations(): void {
+    const before = this.annotations.length;
     this.annotations = this.annotations.filter((a) => a.page !== this.currentPage);
     if (!this.findAnnotation(this.selectedAnnotationId)) {
       this.selectedAnnotationId = '';
     }
     this.syncPayloadFromVisualAnnotations();
+    if (this.annotations.length !== before) {
+      this.invalidateExport('Page annotations cleared. Save annotations to prepare a new download.');
+    }
   }
 
   clearAllAnnotations(): void {
@@ -310,23 +533,27 @@ export class App {
     this.pageIdsInput = '';
     this.selectedAnnotationId = '';
     this.draggingAnnotationId = '';
-    this.statusText = 'Cleared all visual annotations.';
+    this.invalidateExport('Cleared all visual annotations. Save annotations to prepare a new download.');
   }
 
-  async uploadDocument(fileOverride?: File): Promise<void> {
+  async uploadDocument(fileOverride?: File, uploadToken = ++this.uploadRequestSeq): Promise<void> {
     const uploadFile = fileOverride ?? this.selectedFile;
     if (!uploadFile) {
       this.statusText = 'Select a PDF file before upload.';
       return;
     }
-    if (this.uploadingDocument) {
+    if (!this.canUseConfiguredApi()) {
+      this.statusText = this.configError || 'API URL is missing.';
+      return;
+    }
+    if (!this.isPdfFile(uploadFile)) {
+      this.statusText = 'Only PDF files are supported.';
+      this.setResponse('UPLOAD_VALIDATION_ERROR', { error: 'unsupported_media_type', filename: uploadFile.name });
       return;
     }
 
-    // Cancel any in-flight download preparation linked to older state.
-    this.downloadTaskToken += 1;
-    this.preparingDownload = false;
-
+    this.activeUploadToken = uploadToken;
+    this.invalidateExport('New document selected. Existing export was cleared.');
     this.uploadingDocument = true;
     this.statusText = `Uploading ${uploadFile.name}...`;
 
@@ -336,6 +563,9 @@ export class App {
     try {
       const headers = this.authHeaders();
       const resp = await firstValueFrom(this.http.post<UploadResponse>(`${this.apiBase}/v1/documents`, form, { headers }));
+      if (uploadToken !== this.activeUploadToken) {
+        return;
+      }
       this.documentId = resp.document_id;
       this.uploadedPageCount = resp.page_count;
       this.currentPage = 1;
@@ -346,25 +576,57 @@ export class App {
       this.draggingAnnotationId = '';
       this.annotationsJson = '[]';
       this.pageIdsInput = '';
-      this.downloadId = '';
-      this.downloadUrl = '';
-      this.preparingDownload = false;
       this.statusText = `Upload succeeded: ${resp.document_id}`;
       this.setResponse('UPLOAD', resp);
     } catch (err: any) {
-      this.statusText = 'Upload failed';
+      if (uploadToken !== this.activeUploadToken) {
+        return;
+      }
+      this.statusText = this.apiErrorMessage(err);
       this.setResponse('UPLOAD_ERROR', err?.error ?? err?.message ?? err);
     } finally {
-      this.uploadingDocument = false;
-      if (!this.uploadingDocument && this.pendingUploadFile) {
-        await this.processUploadQueue();
+      if (uploadToken === this.activeUploadToken) {
+        this.uploadingDocument = false;
       }
     }
   }
 
-  async saveAnnotations(): Promise<void> {
-    if (!this.documentId) {
+  private createSaveSnapshot(): SaveSnapshot | null {
+    const documentId = this.documentId;
+    const annotationVersion = this.annotationVersion.trim();
+    if (!documentId) {
       this.statusText = 'Upload a document first.';
+      return null;
+    }
+    if (!annotationVersion) {
+      this.statusText = 'Annotation version is required.';
+      return null;
+    }
+
+    let annotations: unknown;
+    try {
+      annotations = JSON.parse(this.annotationsJson);
+    } catch {
+      this.statusText = 'Annotations JSON is invalid.';
+      return null;
+    }
+
+    const pageIds = this.pageIdsInput
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n) && n > 0);
+
+    if (pageIds.length === 0) {
+      this.statusText = 'No page IDs available. Add visual annotations or enter page IDs manually.';
+      return null;
+    }
+
+    return { documentId, annotations, pageIds, annotationVersion };
+  }
+
+  async saveAnnotations(): Promise<void> {
+    if (!this.canUseConfiguredApi()) {
+      this.statusText = this.configError || 'API URL is missing.';
       return;
     }
     if (this.uploadingDocument) {
@@ -372,58 +634,48 @@ export class App {
       return;
     }
 
-    const saveForDocumentId = this.documentId;
-
-    let annotations: unknown;
-    try {
-      annotations = JSON.parse(this.annotationsJson);
-    } catch {
-      this.statusText = 'Annotations JSON is invalid.';
-      return;
-    }
-
-    const pageIds = this.pageIdsInput
-      .split(',')
-      .map((s) => Number(s.trim()))
-      .filter((n) => Number.isFinite(n) && n > 0);
-
-    if (pageIds.length === 0) {
-      this.statusText = 'No page IDs available. Add visual annotations or enter page IDs manually.';
+    const snapshot = this.createSaveSnapshot();
+    if (!snapshot) {
       return;
     }
 
     try {
       this.savingAnnotations = true;
-      const headers = this.authHeaders({ 'If-Match': this.annotationVersion });
-      const body = { annotations, page_ids: pageIds };
+      const headers = this.authHeaders({ 'If-Match': snapshot.annotationVersion });
+      const body = { annotations: snapshot.annotations, page_ids: snapshot.pageIds };
       const resp = await firstValueFrom(
-        this.http.post<AnnotationResponse>(`${this.apiBase}/v1/documents/${saveForDocumentId}/annotations`, body, { headers })
+        this.http.post<AnnotationResponse>(`${this.apiBase}/v1/documents/${snapshot.documentId}/annotations`, body, { headers })
       );
-      if (this.documentId !== saveForDocumentId) {
+      if (this.documentId !== snapshot.documentId) {
         return;
       }
-      this.statusText = `Annotations saved (${resp.annotation_version}). Preparing downloadable PDF...`;
+      const savedVersion = resp.annotation_version;
+      this.annotationVersion = savedVersion;
+      const exportSignature = this.currentAnnotationSignature(savedVersion);
+      this.statusText = `Annotations saved (${savedVersion}). Preparing downloadable PDF...`;
       this.setResponse('ANNOTATIONS', resp);
-      await this.prepareDownloadPdf(saveForDocumentId);
+      await this.prepareDownloadPdf(snapshot.documentId, savedVersion, exportSignature);
     } catch (err: any) {
-      if (this.documentId !== saveForDocumentId) {
+      if (this.documentId !== snapshot.documentId) {
         return;
       }
-      this.statusText = 'Annotation save failed';
+      this.statusText = this.apiErrorMessage(err);
       this.setResponse('ANNOTATIONS_ERROR', err?.error ?? err?.message ?? err);
     } finally {
       this.savingAnnotations = false;
     }
   }
 
-  private async prepareDownloadPdf(documentId: string): Promise<void> {
+  private async prepareDownloadPdf(documentId: string, annotationVersion: string, signature: string): Promise<void> {
     const myTaskToken = ++this.downloadTaskToken;
     this.preparingDownload = true;
     this.downloadId = '';
     this.downloadUrl = '';
+    this.exportStatusUrl = '';
+    this.readyExport = null;
     try {
       const headers = this.authHeaders();
-      const createBody = { format: 'pdf', annotation_version: this.annotationVersion };
+      const createBody = { format: 'pdf', annotation_version: annotationVersion };
       const created = await firstValueFrom(
         this.http.post<DownloadCreateResponse>(`${this.apiBase}/v1/documents/${documentId}/exports`, createBody, { headers })
       );
@@ -431,34 +683,37 @@ export class App {
         return;
       }
       this.downloadId = created.export_id;
+      this.lastExportRequest = { documentId, annotationVersion, signature, exportId: created.export_id };
+      this.exportStatusUrl = `${this.apiBase}/v1/exports/${created.export_id}`;
 
-      for (let i = 0; i < 16; i += 1) {
-        const status = await firstValueFrom(
-          this.http.get<DownloadStatusResponse>(`${this.apiBase}/v1/exports/${this.downloadId}`, { headers })
-        );
+      const delays = [400, 600, 900, 1300, 1800, 2500, 3500, 5000, 7000, 9000, 12000, 15000, 20000, 25000];
+      for (const delayMs of delays) {
+        const status = await this.fetchExportStatus(created.export_id, headers);
         if (myTaskToken !== this.downloadTaskToken || this.documentId !== documentId) {
           return;
         }
         if (status.status === 'complete' && status.download_url) {
-          this.downloadUrl = this.resolveApiUrl(status.download_url);
+          const resolvedUrl = this.resolveApiUrl(status.download_url);
+          this.downloadUrl = resolvedUrl;
+          this.readyExport = { documentId, annotationVersion, signature, exportId: created.export_id, downloadUrl: resolvedUrl };
           this.statusText = 'Annotated PDF is ready to download.';
           this.setResponse('DOWNLOAD_STATUS', status);
           return;
         }
         if (status.status === 'failed') {
-          this.statusText = 'Download preparation failed.';
+          this.statusText = status.error ? `Download preparation failed: ${status.error}` : 'Download preparation failed.';
           this.setResponse('DOWNLOAD_STATUS_ERROR', status);
           return;
         }
-        await this.sleep(400);
+        await this.sleep(delayMs);
       }
 
-      this.statusText = 'Download is still processing. Save again if needed.';
+      this.statusText = 'Download is still processing. Use Refresh Export Status to check again.';
     } catch (err: any) {
       if (myTaskToken !== this.downloadTaskToken || this.documentId !== documentId) {
         return;
       }
-      this.statusText = 'Download request failed';
+      this.statusText = this.apiErrorMessage(err);
       this.setResponse('DOWNLOAD_CREATE_ERROR', err?.error ?? err?.message ?? err);
     } finally {
       if (myTaskToken === this.downloadTaskToken) {
@@ -467,9 +722,57 @@ export class App {
     }
   }
 
+  private async fetchExportStatus(exportId: string, headers = this.authHeaders()): Promise<DownloadStatusResponse> {
+    return await firstValueFrom(this.http.get<DownloadStatusResponse>(`${this.apiBase}/v1/exports/${exportId}`, { headers }));
+  }
+
+  async refreshExportStatus(): Promise<void> {
+    if (!this.lastExportRequest) {
+      this.statusText = 'No export is available to refresh. Save annotations first.';
+      return;
+    }
+    const request = this.lastExportRequest;
+    if (request.documentId !== this.documentId || request.signature !== this.currentAnnotationSignature(request.annotationVersion)) {
+      this.invalidateExport('Current annotations differ from the export. Save annotations to prepare a new download.');
+      return;
+    }
+
+    try {
+      this.preparingDownload = true;
+      const status = await this.fetchExportStatus(request.exportId);
+      if (status.status === 'complete' && status.download_url) {
+        const resolvedUrl = this.resolveApiUrl(status.download_url);
+        this.downloadId = request.exportId;
+        this.downloadUrl = resolvedUrl;
+        this.readyExport = {
+          documentId: request.documentId,
+          annotationVersion: request.annotationVersion,
+          signature: request.signature,
+          exportId: request.exportId,
+          downloadUrl: resolvedUrl
+        };
+        this.statusText = 'Annotated PDF is ready to download.';
+        this.setResponse('DOWNLOAD_STATUS', status);
+        return;
+      }
+      if (status.status === 'failed') {
+        this.statusText = status.error ? `Download preparation failed: ${status.error}` : 'Download preparation failed.';
+        this.setResponse('DOWNLOAD_STATUS_ERROR', status);
+        return;
+      }
+      this.statusText = 'Download is still processing. Refresh again shortly.';
+      this.setResponse('DOWNLOAD_STATUS', status);
+    } catch (err: any) {
+      this.statusText = this.apiErrorMessage(err);
+      this.setResponse('DOWNLOAD_STATUS_ERROR', err?.error ?? err?.message ?? err);
+    } finally {
+      this.preparingDownload = false;
+    }
+  }
+
   downloadAnnotatedFile(): void {
-    if (!this.downloadUrl) {
-      this.statusText = 'No downloadable URL yet.';
+    if (!this.isDownloadCurrent()) {
+      this.statusText = 'No current downloadable PDF is ready. Save annotations first.';
       return;
     }
     window.location.href = this.downloadUrl;
