@@ -189,7 +189,7 @@ export class App {
   private authHeaders(extra: Record<string, string> = {}): HttpHeaders {
     const headers: Record<string, string> = { ...extra };
     if (this.bearerToken) {
-      headers.Authorization = `Bearer ${this.bearerToken}`;
+      headers['Authorization'] = `Bearer ${this.bearerToken}`;
     }
     return new HttpHeaders(headers);
   }
